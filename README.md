@@ -14,7 +14,19 @@ See the section Data Preparation in [VLTinT](https://github.com/UARK-AICV/VLTinT
 
 ## Training
 
-See the section Training in [VLTinT](https://github.com/UARK-AICV/VLTinT).
+To train our best CLV model on ActivityNet Captions:
+
+```
+bash scripts/train_cl_noise.sh anet 0.3 25 --use_env --use_agent --use_lang --use_tint
+```
+To train our best CLV model on YouCook2 Captions:
+```
+bash scripts/train_cl_noise.sh yc2 0.4 25 --use_env --use_agent --use_lang --use_tint
+```
+
+Training log and model will be saved at  `results/anet_re_*`.  
+
+See more details in [VLTinT](https://github.com/UARK-AICV/VLTinT).
 
 ## Evaluation
 
