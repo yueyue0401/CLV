@@ -9,6 +9,10 @@
 #   yc2 training mode: $ bash scripts/train.sh yc2
 
 dset_name=$1  # [anet, yc2]
+dropout_prob=$2
+fully_dropout_epoch=$3
+sigma=$4
+step_difficulty=$5
 use_env=false
 use_agent=false
 use_lang=false
@@ -61,6 +65,10 @@ python src/train.py \
 --max_n_sen ${max_n_sen} \
 --max_t_len ${max_t_len} \
 --max_v_len ${max_v_len} \
+--sigma ${sigma} \
+--step_difficulty ${step_difficulty} \
 --exp_id init \
---batch_size 8 \
+--hidden_dropout_prob ${dropout_prob} \
+--fully_dropout_epoch ${fully_dropout_epoch} \
+--batch_size 2 \
 ${extra_args[@]} 

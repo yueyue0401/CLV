@@ -130,9 +130,10 @@ def gelu(x):
         0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
         Also see https://arxiv.org/abs/1606.08415
     """
-    # m = nn.Mish(True)
-    # return m(x)
-    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+    m = nn.Mish(True)
+    return m(x)
+
+    #return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
 class PositionEncoding(nn.Module):
@@ -226,13 +227,16 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        
+        self.hidden_dropout_prob = config.hidden_dropout_prob
+        self.fully_dropout_epoch = config.fully_dropout_epoch
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)  # (N, L, nh, dh)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)  # (N, nh, L, dh)
 
-    def forward(self, query_states, key_states, value_states, attention_mask):
+    def forward(self, query_states, key_states, value_states, attention_mask, epoch=0):
         """
         Args:
             query_states: (N, Lq, D)
@@ -262,6 +266,10 @@ class BertSelfAttention(nn.Module):
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
+        cl_dropout_prob = min(self.hidden_dropout_prob, self.hidden_dropout_prob * math.sqrt(epoch / self.fully_dropout_epoch))
+        # print('Current dropout prob:', cl_dropout_prob)
+        self.dropout = nn.Dropout(cl_dropout_prob)
+        
         attention_probs = self.dropout(attention_probs)
 
         context_layer = torch.matmul(attention_probs, value_layer)
@@ -277,28 +285,33 @@ class BertSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        
+        self.hidden_dropout_prob = config.hidden_dropout_prob
+        self.fully_dropout_epoch = config.fully_dropout_epoch
 
-    def forward(self, hidden_states, input_tensor):
+    def forward(self, hidden_states, input_tensor, epoch):
         hidden_states = self.dense(hidden_states)
+        cl_dropout_prob = min(self.hidden_dropout_prob, self.hidden_dropout_prob * math.sqrt(epoch / self.fully_dropout_epoch))
+        self.dropout = nn.Dropout(cl_dropout_prob)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
-
+#TODO
 class BertAttention(nn.Module):
     def __init__(self, config):
         super(BertAttention, self).__init__()
         self.self = BertSelfAttention(config)
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, attention_mask):
+    def forward(self, input_tensor, attention_mask, epoch=0):
         """
         Args:
             input_tensor: (N, L, D)
             attention_mask: (N, Lq, L)
         """
-        self_output = self.self(input_tensor, input_tensor, input_tensor, attention_mask)
-        attention_output = self.output(self_output, input_tensor)
+        self_output = self.self(input_tensor, input_tensor, input_tensor, attention_mask, epoch=epoch)
+        attention_output = self.output(self_output, input_tensor, epoch=epoch)
         return attention_output
 
 
@@ -320,9 +333,15 @@ class BertOutput(nn.Module):
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        
+        self.hidden_dropout_prob = config.hidden_dropout_prob
+        self.fully_dropout_epoch = config.fully_dropout_epoch
 
-    def forward(self, hidden_states, input_tensor):
+    def forward(self, hidden_states, input_tensor, epoch=0):
         hidden_states = self.dense(hidden_states)
+        cl_dropout_prob = min(self.hidden_dropout_prob, self.hidden_dropout_prob * math.sqrt(epoch / self.fully_dropout_epoch))
+        # print('Current dropout prob:', cl_dropout_prob)
+        self.dropout = nn.Dropout(cl_dropout_prob)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -335,10 +354,10 @@ class BertLayer(nn.Module):
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(self, hidden_states, attention_mask, epoch=0):
         attention_output = self.attention(hidden_states, attention_mask)
         intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
+        layer_output = self.output(intermediate_output, attention_output, epoch=epoch)
         return layer_output
 
 
@@ -347,10 +366,10 @@ class BertEncoder(nn.Module):
         super(BertEncoder, self).__init__()
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, epoch=0):
         all_encoder_layers = []
         for layer_module in self.layer:
-            hidden_states = layer_module(hidden_states, attention_mask)
+            hidden_states = layer_module(hidden_states, attention_mask, epoch=epoch)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
@@ -410,7 +429,7 @@ class BertLayerNoMemory(nn.Module):
         self.hidden_intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(self, hidden_states, attention_mask, epoch=0):
         """
         Args:
             hidden_states: (N, L, D)
@@ -421,7 +440,7 @@ class BertLayerNoMemory(nn.Module):
         shifted_self_mask = make_pad_shifted_mask(attention_mask, max_v_len, max_t_len)  # (N, L, L)
         attention_output = self.attention(hidden_states, shifted_self_mask)  # (N, L, D)
         intermediate_output = self.hidden_intermediate(attention_output)  # (N, L, D)
-        layer_output = self.output(intermediate_output, attention_output)  # (N, L, D)
+        layer_output = self.output(intermediate_output, attention_output, epoch=epoch)  # (N, L, D)
         return layer_output
 
 
@@ -430,7 +449,7 @@ class BertEncoderNoMemory(nn.Module):
         super(BertEncoderNoMemory, self).__init__()
         self.layer = nn.ModuleList([BertLayerNoMemory(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, epoch=0):
         """
         Args:
             hidden_states: (N, L, D)
@@ -439,7 +458,7 @@ class BertEncoderNoMemory(nn.Module):
         """
         all_encoder_layers = []
         for layer_idx, layer_module in enumerate(self.layer):
-            hidden_states = layer_module(hidden_states, attention_mask)
+            hidden_states = layer_module(hidden_states, attention_mask, epoch=epoch)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
@@ -459,12 +478,12 @@ class BertLayerWithMemory(nn.Module):
         self.memory_fuser = M2RF(config, config.max_v_len+config.max_t_len)
         self.memory_output = BertSelfOutput(config)
 
-    def forward(self, prev_m, hidden_states, attention_mask=None):
+    def forward(self, prev_m, hidden_states, attention_mask=None, epoch=0):
         max_v_len, max_t_len = self.config.max_v_len, self.config.max_t_len
         shifted_self_mask = make_pad_shifted_mask(attention_mask, max_v_len, max_t_len)
         attention_output = self.attention(hidden_states, shifted_self_mask)
         intermediate_output = self.hidden_intermediate(attention_output)
-        hidden_states = self.output(intermediate_output, attention_output)
+        hidden_states = self.output(intermediate_output, attention_output, epoch=epoch)
         
         if prev_m is None:
             bsz, tmprl_sz, ft_sz = hidden_states.shape
@@ -475,7 +494,7 @@ class BertLayerWithMemory(nn.Module):
 
         fused_features = self.memory_fuser(hidden_states, memory_fused)
 
-        layer_output = self.memory_output(fused_features, hidden_states)
+        layer_output = self.memory_output(fused_features, hidden_states, epoch=epoch)
         return updated_m, layer_output
 
 
@@ -491,7 +510,7 @@ class MARTLayerWithMemory(nn.Module):
         self.memory_projection = nn.Linear(config.intermediate_size, config.hidden_size)
         self.output = BertOutput(config)
 
-    def forward(self, prev_m, hidden_states, attention_mask):
+    def forward(self, prev_m, hidden_states, attention_mask, epoch=0):
         """
         Args:
             prev_m: (N, M, D)
@@ -511,7 +530,7 @@ class MARTLayerWithMemory(nn.Module):
             prev_m = self.memory_initilizer(intermediate_output, init_memory_mask)  # (N, L, Di)
 
         # update memory, use raw attention_mask, no need to hide the text
-        updated_m = self.memory_updater(prev_m, intermediate_output, attention_mask)  # (N, M, Di)
+        updated_m = self.memory_updater(prev_m, intermediate_output, attention_mask, epoch=epoch)  # (N, M, Di)
 
         concat_mh = torch.cat([prev_m, intermediate_output], dim=1)  # [(N, M, Di); (N, L, Di)] => [N, M+L, Di]
         bsz, n_memory_cells = prev_m.shape[:2]
@@ -520,10 +539,10 @@ class MARTLayerWithMemory(nn.Module):
         memory_attention_mask = make_pad_shifted_mask(
             raw_memory_attention_mask, max_v_len, max_t_len, memory_len=n_memory_cells)
         memory_attention_output = self.memory_augmented_attention(
-            intermediate_output, concat_mh, concat_mh, memory_attention_mask)  # (N, L, Di)
+            intermediate_output, concat_mh, concat_mh, memory_attention_mask, epoch=epoch)  # (N, L, Di)
         memory_attention_output = self.memory_projection(memory_attention_output)  # (N, L, Di) -> (N, L, D)
 
-        layer_output = self.output(memory_attention_output, attention_output)  # (N, L, D)
+        layer_output = self.output(memory_attention_output, attention_output, epoch=epoch)  # (N, L, D)
 
         return updated_m, layer_output
 
@@ -542,7 +561,7 @@ class BertEncoderWithMemory(nn.Module):
             print("using TinT layer")
             self.layer = nn.ModuleList([BertLayerWithMemory(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, prev_ms, hidden_states, attention_mask, output_all_encoded_layers=True):
+    def forward(self, prev_ms, hidden_states, attention_mask, output_all_encoded_layers=True, epoch=0):
         """
         Args:
             prev_ms: [(N, M, D), ] * num_hidden_layers or None at first step. Memory states for each layer
@@ -552,7 +571,7 @@ class BertEncoderWithMemory(nn.Module):
         """
         all_encoder_layers = []
         for layer_idx, layer_module in enumerate(self.layer):
-            prev_ms[layer_idx], hidden_states = layer_module(prev_ms[layer_idx], hidden_states, attention_mask)
+            prev_ms[layer_idx], hidden_states = layer_module(prev_ms[layer_idx], hidden_states, attention_mask, epoch=epoch)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
@@ -620,16 +639,17 @@ class Fuser(nn.Module):
         self.output = BertOutput(config)
         
 
-    def forward(self, src, src_mask=None, key_padding_mask=None):
+    def forward(self, src, src_mask=None, key_padding_mask=None, epoch=0):
         src2 = self.attention(
             src, src, src, attn_mask=src_mask,
             key_padding_mask=key_padding_mask
         )[0]
+        # TODO add norm layer
         if key_padding_mask is not None:
             src2 = src2.masked_fill(key_padding_mask.permute(1, 0).unsqueeze(-1), 0)
-        src = self.self_output(src2, src)
+        src = self.self_output(src2, src, epoch=epoch)
         src2 = self.intermediate(src)
-        src = self.output(src2, src)
+        src = self.output(src2, src, epoch=epoch)
         if key_padding_mask is not None:
             src = src.masked_fill(key_padding_mask.permute(1, 0).unsqueeze(-1), 0)
         return src
@@ -645,7 +665,7 @@ class HAM(nn.Module):
         self.hard = False
         self.hybrid = False
 
-    def forward(self, env_features=None, agent_features=None, agent_masks=None):
+    def forward(self, env_features=None, agent_features=None, agent_masks=None, epoch=0):
         if agent_features is None:
             return env_features
 
@@ -693,7 +713,7 @@ class HAM(nn.Module):
 
                 padded_output = torch.zeros(bsz * (smpl_end - smpl_bgn), ft_sz, device=agent_features.device)  # bsz x feat_dim
                 if self.soft or self.hybrid:
-                    fuser_output = self.fuser(fuser_input, key_padding_mask=~hard_attn_masks)  # n_boxes x keep_mask x feat_dim
+                    fuser_output = self.fuser(fuser_input, key_padding_mask=~hard_attn_masks, epoch=epoch)  # n_boxes x keep_mask x feat_dim
                 if self.hard:
                     fuser_output = fuser_input * hard_attn_masks.permute(1, 0).contiguous().unsqueeze(-1)
                 fuser_output = torch.sum(fuser_output, dim=0) / torch.sum(hard_attn_masks, dim=-1, keepdim=True)  # keep_mask x feat_dim
@@ -709,7 +729,7 @@ class M2RF(nn.Module):
         self.fuser = Fuser(config)
         self.attention_steps = config.max_v_len if attention_steps is None else attention_steps
 
-    def forward(self, *features, device=None):
+    def forward(self, *features, device=None, epoch=0):
         to_cat_features = [i for i in features if i is not None]
 
         cat_features = torch.stack(to_cat_features, dim=2)
@@ -722,7 +742,7 @@ class M2RF(nn.Module):
             fuser_input = cat_features[:, smpl_bgn:smpl_end].contiguous()
             fuser_input = fuser_input.view(-1, len(to_cat_features), ft_sz).permute(1, 0, 2)
 
-            fuser_output = self.fuser(fuser_input)
+            fuser_output = self.fuser(fuser_input, epoch=epoch)
             fuser_output = torch.mean(fuser_output, dim=0)
             context_features[:, smpl_bgn:smpl_end] = fuser_output.view(bsz, -1, ft_sz)
         return context_features
@@ -754,8 +774,8 @@ class BertEmbeddingsWithVideo(nn.Module):
             BertLayerNorm(config.word_vec_size, eps=config.layer_norm_eps),
             nn.Dropout(config.hidden_dropout_prob),
             nn.Linear(config.word_vec_size, config.hidden_size),
-            # nn.Mish(True),
-            nn.ReLU(True),
+            nn.Mish(True),
+            #nn.ReLU(True),
             BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
         )
 
@@ -763,8 +783,8 @@ class BertEmbeddingsWithVideo(nn.Module):
             BertLayerNorm(config.video_feature_size, eps=config.layer_norm_eps),
             nn.Dropout(config.hidden_dropout_prob),
             nn.Linear(config.video_feature_size, config.hidden_size),
-            # nn.Mish(True),
-            nn.ReLU(True),
+            nn.Mish(True),
+            #nn.ReLU(True),
             BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
         )
 
@@ -772,8 +792,8 @@ class BertEmbeddingsWithVideo(nn.Module):
             BertLayerNorm(config.video_feature_size, eps=config.layer_norm_eps),
             nn.Dropout(config.hidden_dropout_prob),
             nn.Linear(config.video_feature_size, config.hidden_size),
-            # nn.Mish(True),
-            nn.ReLU(True),
+            nn.Mish(True),
+            #nn.ReLU(True),
             BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
         )
         
@@ -786,6 +806,9 @@ class BertEmbeddingsWithVideo(nn.Module):
         # any TensorFlow checkpoint file
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        
+        self.hidden_dropout_prob = config.hidden_dropout_prob
+        self.fully_dropout_epoch = config.fully_dropout_epoch
 
     def set_pretrained_embedding(self, pretrained_embedding, freeze=True):
         """Note the from_pretrained does not work in-place, so you need to assign value to the embedding"""
@@ -794,25 +817,29 @@ class BertEmbeddingsWithVideo(nn.Module):
                                                             padding_idx=self.word_embeddings.padding_idx)
 
     def forward(self, input_ids, video_features, token_type_ids,
-            agent_feature, agent_mask, lang_feature, lang_mask):
+            agent_feature, agent_mask, lang_feature, lang_mask, epoch=0):
         """
         Args:
             input_ids: (N, L)
             video_features: (N, L, D)
             token_type_ids: (N, L, D)
         """
+        cl_dropout_prob = min(self.hidden_dropout_prob, self.hidden_dropout_prob * math.sqrt(epoch / self.fully_dropout_epoch))
+        # print('Current dropout prob:', cl_dropout_prob)
+        self.word_fc[1] = nn.Dropout(cl_dropout_prob)
+        
         words_embeddings = self.word_fc(self.word_embeddings(input_ids))
         env_embeddings, agent_embeddings, lang_embeddings = None, None, None
         if self.use_env:
             env_embeddings = self.video_embeddings(video_features)
         if self.use_agent:
             agent_embeddings = self.agent_embeddings(agent_feature)
-            agent_embeddings = self.ham_agent(env_embeddings, agent_embeddings, agent_mask)
+            agent_embeddings = self.ham_agent(env_embeddings, agent_embeddings, agent_mask, epoch=epoch)
         if self.use_lang:
             lang_embeddings = self.word_fc(self.word_embeddings(lang_feature))
-            lang_embeddings = self.ham_lang(env_embeddings, lang_embeddings, lang_mask)
+            lang_embeddings = self.ham_lang(env_embeddings, lang_embeddings, lang_mask, epoch=epoch)
         
-        fused_embeddings = self.m2rf(env_embeddings, agent_embeddings, lang_embeddings)
+        fused_embeddings = self.m2rf(env_embeddings, agent_embeddings, lang_embeddings, epoch=epoch)
         
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -839,8 +866,8 @@ class BertEmbeddingsTextUntied(nn.Module):
             BertLayerNorm(config.word_vec_size, eps=config.layer_norm_eps),
             nn.Dropout(config.hidden_dropout_prob),
             nn.Linear(config.word_vec_size, config.hidden_size),
-            # nn.Mish(True),
-            nn.ReLU(True),
+            nn.Mish(True),
+            #nn.ReLU(True),
             BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
         )
         self.position_embeddings_text = PositionEncoding(n_filters=config.hidden_size,
@@ -871,8 +898,8 @@ class BertEmbeddingsVideoUntied(nn.Module):
             BertLayerNorm(config.video_feature_size, eps=config.layer_norm_eps),
             nn.Dropout(config.hidden_dropout_prob),
             nn.Linear(config.video_feature_size, config.hidden_size),
-            # nn.Mish(True),
-            nn.ReLU(True),
+            nn.Mish(True),
+            #nn.ReLU(True),
             BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
         )
         self.position_embeddings_video = PositionEncoding(n_filters=config.hidden_size,
@@ -894,7 +921,7 @@ class BertLayerNoMemoryUntied(nn.Module):
         self.memory_intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states, attention_mask, diagonal_mask=False):
+    def forward(self, hidden_states, attention_mask, diagonal_mask=False, epoch=0):
         """
         Args:
             hidden_states: (N, L, D)
@@ -908,7 +935,7 @@ class BertLayerNoMemoryUntied(nn.Module):
                 torch.tril(self_attention_mask.new_ones(max_len, max_len), diagonal=0)
         attention_output = self.attention(hidden_states, self_attention_mask)  # (N, L, D)
         intermediate_output = self.hidden_intermediate(attention_output)  # (N, L, D)
-        layer_output = self.output(intermediate_output, attention_output)  # (N, L, D)
+        layer_output = self.output(intermediate_output, attention_output, epoch=epoch)  # (N, L, D)
         return layer_output
 
 
@@ -917,7 +944,7 @@ class BertEncoderNoMemoryUntied(nn.Module):
         super(BertEncoderNoMemoryUntied, self).__init__()
         self.layer = nn.ModuleList([BertLayerNoMemoryUntied(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, diagonal_mask=False, output_all_encoded_layers=True):
+    def forward(self, hidden_states, attention_mask, diagonal_mask=False, output_all_encoded_layers=True, epoch=0):
         """
         Args:
             hidden_states: (N, L, D)
@@ -927,14 +954,14 @@ class BertEncoderNoMemoryUntied(nn.Module):
         """
         all_encoder_layers = []
         for layer_idx, layer_module in enumerate(self.layer):
-            hidden_states = layer_module(hidden_states, attention_mask, diagonal_mask)
+            hidden_states = layer_module(hidden_states, attention_mask, diagonal_mask, epoch=epoch)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
             all_encoder_layers.append(hidden_states)
         return all_encoder_layers
 
-
+#TODO
 class BertDecoderLayerNoMemoryUntied(nn.Module):
     def __init__(self, config):
         super(BertDecoderLayerNoMemoryUntied, self).__init__()
@@ -945,7 +972,7 @@ class BertDecoderLayerNoMemoryUntied(nn.Module):
         self.norm2 = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.output = BertOutput(config)  # linear + residual + layernorm
 
-    def forward(self, dec_hidden_states, dec_mask, enc_outputs, enc_mask, diagonal_mask=True):
+    def forward(self, dec_hidden_states, dec_mask, enc_outputs, enc_mask, diagonal_mask=True, epoch=0):
         """
         Args:
             dec_hidden_states: (N, Lt, D)
@@ -962,7 +989,7 @@ class BertDecoderLayerNoMemoryUntied(nn.Module):
 
         # 1, dec self attn + add_norm
         attention_output = self.self_attention(
-            dec_hidden_states, dec_hidden_states, dec_hidden_states, self_attention_mask)  # (N, Lt, D)
+            dec_hidden_states, dec_hidden_states, dec_hidden_states, self_attention_mask, epoch=epoch)  # (N, Lt, D)
         attention_output = self.norm1(attention_output + dec_hidden_states)  # (N, Lt, D)
 
         # 2, dec enc attn + add_norm
@@ -971,11 +998,11 @@ class BertDecoderLayerNoMemoryUntied(nn.Module):
         # Additionally, there is no need to do subsequent masking, since each word has the right to see
         # all the video info.
         dec_enc_attention_output = self.dec_enc_attention(
-            attention_output, enc_outputs, enc_outputs, enc_mask.unsqueeze(1))  # (N, Lt, D)
+            attention_output, enc_outputs, enc_outputs, enc_mask.unsqueeze(1), epoch=epoch)  # (N, Lt, D)
         dec_enc_attention_output = self.norm2(attention_output + dec_enc_attention_output)  # (N, Lt, D)
 
         # 3, linear + add_norm
-        dec_enc_attention_output = self.output(dec_enc_attention_output, dec_enc_attention_output)  # (N, Lt, D)
+        dec_enc_attention_output = self.output(dec_enc_attention_output, dec_enc_attention_output, epoch=epoch)  # (N, Lt, D)
         return dec_enc_attention_output  # (N, Lt, D)
 
 
@@ -986,7 +1013,7 @@ class BertDecoderNoMemoryUntied(nn.Module):
                                     for _ in range(config.num_hidden_layers)])
 
     def forward(self, dec_hidden_states, dec_mask, enc_outputs, enc_mask,
-                diagonal_mask=True, output_all_encoded_layers=False):
+                diagonal_mask=True, output_all_encoded_layers=False, epoch=0):
         """
         Args:
             dec_hidden_states: (N, Lt, D)
@@ -999,7 +1026,7 @@ class BertDecoderNoMemoryUntied(nn.Module):
         all_encoder_layers = []
         for layer_idx, layer_module in enumerate(self.layer):
             dec_hidden_states = layer_module(
-                dec_hidden_states, dec_mask, enc_outputs, enc_mask, diagonal_mask=True)
+                dec_hidden_states, dec_mask, enc_outputs, enc_mask, diagonal_mask=True, epoch=epoch)
             if output_all_encoded_layers:
                 all_encoder_layers.append(dec_hidden_states)
         if not output_all_encoded_layers:
@@ -1044,7 +1071,7 @@ class MemoryUpdater(nn.Module):
         self.mz = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.sz = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
 
-    def forward(self, prev_m, input_states, attention_mask):
+    def forward(self, prev_m, input_states, attention_mask, epoch=0):
         """ This module should have access to all the text at this step,
         since its state will not be used for generation at current step
         Args:
@@ -1055,7 +1082,7 @@ class MemoryUpdater(nn.Module):
         # memory attended inputs
         n_memory_cells = prev_m.shape[1]
         update_mask = attention_mask.unsqueeze(1).repeat(1, n_memory_cells, 1)  # (N, M, L)
-        s_t = self.memory_update_attention(prev_m, input_states, input_states, update_mask)  # (N, M, D),
+        s_t = self.memory_update_attention(prev_m, input_states, input_states, update_mask, epoch=epoch)  # (N, M, D),
 
         c_t = torch.tanh(self.mc(prev_m) + self.sc(s_t))  # (N, M, D)
 
@@ -1076,6 +1103,7 @@ class BertPredictionHeadTransform(nn.Module):
         """(N, L, D)"""
         hidden_states = self.dense(hidden_states)
         hidden_states = self.transform_act_fn(hidden_states)
+        # TODO add norm layer
         hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
 
@@ -1139,15 +1167,15 @@ class RecursiveTransformer(nn.Module):
 
     def forward_step(self, prev_ms, input_ids, video_features,
                     input_masks, token_type_ids, agent_feature,
-                    agent_mask, lang_feature, lang_mask):
+                    agent_mask, lang_feature, lang_mask, epoch=0):
         """single step forward in the recursive structure"""
         embeddings = self.embeddings(
             input_ids, video_features, token_type_ids,
-            agent_feature, agent_mask, lang_feature, lang_mask
+            agent_feature, agent_mask, lang_feature, lang_mask, epoch=epoch
         )  # (N, L, D)
 
         prev_ms, encoded_layer_outputs = self.encoder(
-            prev_ms, embeddings, input_masks, output_all_encoded_layers=False)  # both outputs are list
+            prev_ms, embeddings, input_masks, output_all_encoded_layers=False, epoch=epoch)  # both outputs are list
         prediction_scores = self.decoder(encoded_layer_outputs[-1])  # (N, L, vocab_size)
         return prev_ms, encoded_layer_outputs, prediction_scores
 
@@ -1162,7 +1190,8 @@ class RecursiveTransformer(nn.Module):
         lang_mask_list,
         input_labels_list,
         sent_feat_list=None,
-        return_memory=False):
+        return_memory=False,
+        epoch=0):
         """
         Args:
             input_ids_list: [(N, L)] * step_size
@@ -1183,7 +1212,7 @@ class RecursiveTransformer(nn.Module):
             prev_ms, encoded_layer_outputs, prediction_scores = \
                     self.forward_step(prev_ms, input_ids_list[idx], video_features_list[idx],
                                     input_masks_list[idx], token_type_ids_list[idx], agent_feature_list[idx],
-                                    agent_mask_list[idx], lang_feature_list[idx], lang_mask_list[idx])
+                                    agent_mask_list[idx], lang_feature_list[idx], lang_mask_list[idx], epoch=epoch)
 
             memory_list.append(prev_ms)
             encoded_outputs_list.append(encoded_layer_outputs)

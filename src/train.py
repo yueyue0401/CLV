@@ -26,10 +26,10 @@ from src.translate import run_translate
 from src.utils import save_parsed_args_to_json, save_json, load_json, \
     count_parameters, merge_dicts
 from easydict import EasyDict as EDict
+# import wandb
 from tensorboardX import SummaryWriter
 import logging
 logger = logging.getLogger(__name__)
-
 
 class GaussianNoise(nn.Module):
     """Gaussian noise regularizer.
@@ -73,9 +73,8 @@ def train_epoch(model, training_data, optimizer, ema, device, opt, writer, epoch
     total_loss = 0
     n_word_total = 0
     n_word_correct = 0
-
+    
     sigma = min(opt.sigma, epoch / opt.step_difficulty * opt.sigma)
-    # sigma = opt.sigma
     noise = GaussianNoise(sigma=sigma)
 
     torch.autograd.set_detect_anomaly(True)
@@ -107,14 +106,14 @@ def train_epoch(model, training_data, optimizer, ema, device, opt, writer, epoch
                     logger.info("token_type_ids \n{}".format(cur_data["token_type_ids"][batch_idx]))
 
                 print_info(batched_data, 0, 0)
-            
+
+            # video_features_list_noise = noise(video_features_list)
             video_features_list = [noise(vid_f) for vid_f in video_features_list]
 
             # forward & backward
             optimizer.zero_grad()
             loss, pred_scores_list = model(
                 input_ids_list,
-                # video_features_list_noise,
                 video_features_list,
                 input_masks_list,
                 token_type_ids_list,
@@ -123,7 +122,8 @@ def train_epoch(model, training_data, optimizer, ema, device, opt, writer, epoch
                 lang_feature_list,
                 lang_mask_list,
                 input_labels_list,
-                sent_feat_list
+                sent_feat_list,
+                epoch=epoch
             )
         else:  # single sentence
             if opt.untied or opt.mtrans:
@@ -389,9 +389,17 @@ def train(model, training_data, validation_data, device, opt, resume_path=None):
             ema.load_state_dict(state_dict["ema"])
         opt = state_dict["opt"]
         last_epoch = state_dict["epoch"]
+        # run_id = wandb.util.generate_id()
+        # opt.run_id = run_id
+        # wandb.init(project="recurrent transformer", config=opt, id=opt.run_id, resume=True)
     else:
         last_epoch = 0
+        # run_id = wandb.util.generate_id()
+        # opt.run_id = run_id
+        # wandb.init(project="recurrent transformer", config=opt, id=run_id, resume="allow")
         
+    # wandb.watch(model)
+    # print("run id: ", run_id)
 
     prev_best_score = 0.
     es_cnt = 0
@@ -409,6 +417,7 @@ def train(model, training_data, validation_data, device, opt, resume_path=None):
         niter = (epoch_i + 1) * len(training_data)  # number of bart
         writer.add_scalar("Train/Acc", train_acc, niter)
         writer.add_scalar("Train/Loss", train_loss, niter)
+        # wandb.log({"train_loss": train_loss, "train_acc": train_acc})
 
         start = time.time()
 
@@ -441,6 +450,12 @@ def train(model, training_data, validation_data, device, opt, resume_path=None):
         writer.add_scalar("Val/Bleu_4", val_greedy_output["Bleu_4"]*100, niter)
         writer.add_scalar("Val/CIDEr", val_greedy_output["CIDEr"]*100, niter)
         writer.add_scalar("Val/Re4", val_greedy_output["re4"]*100, niter)
+        # wandb.log({
+        #     "val_meteor": val_greedy_output["METEOR"]*100,
+        #     "val_bleu4": val_greedy_output["Bleu_4"]*100,
+        #     "val_cider": val_greedy_output["CIDEr"]*100,
+        #     "val_re4": val_greedy_output["re4"]*100
+        # })
 
         torch.save(checkpoint, opt.save_model + "_last.ckpt")
 
@@ -481,6 +496,9 @@ def train(model, training_data, validation_data, device, opt, resume_path=None):
         if opt.debug:
             break
 
+    # wandb.save(os.path.join(opt.save_model, "tmp_greedy_pred_*_all_metrics.json"))
+    # wandb.save(os.path.join(opt.save_model, "tmp_greedy_pred_*.json"))
+    # wandb.save(os.path.join(opt.save_model, "model.ckpt"))
     writer.close()
 
 
@@ -510,6 +528,7 @@ def get_args():
     parser.add_argument("--type_vocab_size", type=int, default=2) #2, help="video as 0, text as 1")
     parser.add_argument("--layer_norm_eps", type=float, default=1e-12)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.1)
+    parser.add_argument("--fully_dropout_epoch", type=int, default=20)
     parser.add_argument("--num_hidden_layers", type=int, default=3, help="number of transformer layers")
     parser.add_argument("--attention_probs_dropout_prob", type=float, default=0.1)
     parser.add_argument("--num_attention_heads", type=int, default=12)
@@ -574,9 +593,10 @@ def get_args():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--eval_tool_dir", type=str, default="./densevid_eval")
     parser.add_argument("--resume_path", type=str, default=None)
-
+    
     parser.add_argument("--sigma", default=0.1, type=float)
     parser.add_argument("--step_difficulty", default=25, type=int)
+
 
     opt = parser.parse_args()
     opt.cuda = not opt.no_cuda
@@ -606,13 +626,8 @@ def get_args():
             "sharing the word embedding weight and the final classifier weight"
     
     # YouCook2 should be false
-    # opt.use_agent = False
-
+    opt.use_agent = False
     
-    opt.seed = random.randint(1, 1000000)
-    opt.sigma = random.randint(1, 300)/100
-    opt.step_difficulty = random.randint(15,35)
-
     return opt
 
 
@@ -670,6 +685,7 @@ def main():
         type_vocab_size=opt.type_vocab_size,
         layer_norm_eps=opt.layer_norm_eps,  # bert layernorm
         hidden_dropout_prob=opt.hidden_dropout_prob,  # applies everywhere except attention
+        fully_dropout_epoch=opt.fully_dropout_epoch,
         num_hidden_layers=opt.num_hidden_layers,  # number of transformer layers
         num_attention_heads=opt.num_attention_heads,
         attention_probs_dropout_prob=opt.attention_probs_dropout_prob,  # applies only to self attention

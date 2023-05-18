@@ -145,9 +145,9 @@ class RecursiveCaptionDataset(Dataset):
             feat_path_clip = os.path.join(self.clip_feature_dir, "v_{}.json".format(video_name) if self.dset_name == "anet" else "{}.json".format(video_name))
             if video_name not in self.duration.keys():
                 self.missing_video_names.append(video_name)
+            
             for p in [feat_path_env, feat_path_agent, feat_path_clip]:
                 if not os.path.exists(p):
-                    print('PPPPP', p)
                     self.missing_video_names.append(video_name)
         print("Missing {} features (clips/sentences) from {} videos".format(
             len(self.missing_video_names), len(set(self.missing_video_names))))
@@ -182,7 +182,6 @@ class RecursiveCaptionDataset(Dataset):
         self.duration = duration
 
     def _load_data(self, data_path):
-        print('data_path', data_path)
         logging.info("Loading data from {}".format(data_path))
         raw_data = load_json(data_path)
         data = []
@@ -369,13 +368,7 @@ class RecursiveCaptionDataset(Dataset):
         """
         max_v_l = self.max_v_len - 2
         num_agent = 35
-        
-        try:
-            feat_video = np.zeros((self.max_v_len, raw_vid_feat.shape[1]))  # includes [CLS], [SEP]
-        except:
-            print('DEBUGGGGG',raw_vid_feat)
-            print('DEBUGGGGG',raw_vid_feat.shape)
-            
+        feat_video = np.zeros((self.max_v_len, raw_vid_feat.shape[1]))  # includes [CLS], [SEP]
         # feat_image = np.zeros((self.max_v_len, raw_image_feat.shape[1]))
         feat_agent = np.zeros((self.max_v_len, num_agent, raw_vid_feat.shape[1]))
         agent_mask = np.zeros((self.max_v_len, num_agent))
